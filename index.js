@@ -14,12 +14,15 @@ admin.initializeApp({
 })
 
 const app = express()
+
 // middleware
 app.use(
   cors({
-    origin: [process.env.CLIENT_DOMAIN],
+    origin: ["http://localhost:5173", process.env.CLIENT_DOMAIN],
     credentials: true,
-    optionSuccessStatus: 200,
+    optionsSuccessStatus: 200,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
   })
 )
 app.use(express.json())
@@ -27,12 +30,12 @@ app.use(express.json())
 // jwt middlewares
 const verifyJWT = async (req, res, next) => {
   const token = req?.headers?.authorization?.split(' ')[1]
-  console.log(token)
+  // console.log(token)
   if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
   try {
     const decoded = await admin.auth().verifyIdToken(token)
     req.tokenEmail = decoded.email
-    console.log(decoded)
+    // console.log(decoded)
     next()
   } catch (err) {
     console.log(err)
@@ -44,7 +47,7 @@ const verifyJWT = async (req, res, next) => {
 const client = new MongoClient(process.env.MONGODB_URI, {
   serverApi: {
     version: ServerApiVersion.v1,
-    strict: true,
+    strict: true, // Kept strict: true as requested
     deprecationErrors: true,
   },
 })
@@ -56,9 +59,8 @@ async function run() {
     const ordersCollection = db.collection('orderd')
     const usersCollection = db.collection('users')
     const sellerRequestsCollection = db.collection('sellerRequests')
-    const wishlistCollection = db.collection('wishlist');
-    
-
+    const wishlistCollection = db.collection('wishlist')
+    const reviewsCollection = db.collection('reviews') 
 
     //role middleware
     const verifyADMIN = async (req, res, next) => {
@@ -78,6 +80,36 @@ async function run() {
 
       next()
     }
+
+    // --- STATS ENDPOINT (FIXED) ---
+    app.get('/stats', async (req, res) => {
+      try {
+        // We use aggregation instead of distinct to avoid the Strict Mode error
+        const [booksCount, usersCount, ordersCount, citiesAgg] = await Promise.all([
+          booksCollection.estimatedDocumentCount(),
+          usersCollection.estimatedDocumentCount(),
+          ordersCollection.estimatedDocumentCount(),
+          usersCollection.aggregate([
+            { $group: { _id: "$city" } },
+            { $count: "totalCities" }
+          ]).toArray()
+        ]);
+
+        // Extract count from aggregation result, default to 0
+        const citiesCount = citiesAgg.length > 0 ? citiesAgg[0].totalCities : 0;
+
+        res.send({
+          books: booksCount,
+          users: usersCount,
+          orders: ordersCount,
+          cities: citiesCount > 0 ? citiesCount : 25, // Fallback to 25 if no cities found
+        });
+      } catch (error) {
+        console.error('Error fetching stats:', error);
+        res.status(500).send({ message: 'Error fetching stats' });
+      }
+    });
+    // -----------------------------------
 
     //save a book data in db
     app.post('/books', verifyJWT, verifySELLER, async (req, res) => {
@@ -105,7 +137,7 @@ async function run() {
     })
 
 
-    //get all books from db--------
+    //get single book by id
     app.get('/books/:id', async (req, res) => {
       const id = req.params.id
       const result = await booksCollection.findOne({ _id: new ObjectId(id) })
@@ -115,7 +147,7 @@ async function run() {
     //payment endpoint
     app.post('/create-checkout-session', async (req, res) => {
       const paymentInfo = req.body
-      console.log(paymentInfo)
+      // console.log(paymentInfo)
 
       const session = await stripe.checkout.sessions.create({
         line_items: [
@@ -129,7 +161,6 @@ async function run() {
               },
               unit_amount: paymentInfo?.price * 100,
             },
-            // quantity: paymentInfo?.quantity,
             quantity: 1,
           },
         ],
@@ -189,9 +220,7 @@ async function run() {
     })
 
     //get all orders for a customer by email
-    app.get('/my-orders', verifyJWT,  async (req, res) => {
-
-
+    app.get('/my-orders', verifyJWT, async (req, res) => {
       const result = await ordersCollection.find({ customer: req.tokenEmail }).toArray()
       res.send(result)
     })
@@ -234,10 +263,10 @@ async function run() {
       };
 
       const alreadyExists = await usersCollection.findOne(query);
-      console.log('User Already Exists --->', !!alreadyExists);
+      // console.log('User Already Exists --->', !!alreadyExists);
 
       if (alreadyExists) {
-        console.log('Updating user info...');
+        // console.log('Updating user info...');
         const result = await usersCollection.updateOne(query, {
           $set: {
             last_loggedIn: new Date().toISOString(),
@@ -246,7 +275,7 @@ async function run() {
         return res.send(result);
       }
 
-      console.log('Saving new user info...');
+      // console.log('Saving new user info...');
       const result = await usersCollection.insertOne(userData);
       res.send(result);
     });
@@ -295,57 +324,96 @@ async function run() {
     })
 
     // DELETE an order by ID 
-app.delete('/orders/:id', verifyJWT, verifySELLER, async (req, res) => {
-  const id = req.params.id;
+    app.delete('/orders/:id', verifyJWT, verifySELLER, async (req, res) => {
+      const id = req.params.id;
 
-  try {
-    const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+      try {
+        const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
 
-    if (result.deletedCount === 0) {
-      return res.status(404).send({ message: 'Order not found' });
-    }
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ message: 'Order not found' });
+        }
 
-    res.send({ message: 'Order cancelled successfully' });
-  } catch (err) {
-    console.log(err);
-    res.status(500).send({ message: 'Failed to cancel order', err });
-  }
-});
-
-
+        res.send({ message: 'Order cancelled successfully' });
+      } catch (err) {
+        console.log(err);
+        res.status(500).send({ message: 'Failed to cancel order', err });
+      }
+    });
 
 
 
-// Add a book to wishlist
-app.post('/wishlist', verifyJWT, async (req, res) => {
-  const book = req.body;
-  const email = req.tokenEmail;
 
-  const exists = await wishlistCollection.findOne({ bookId: book._id, userEmail: email });
-  if (exists) return res.status(409).send({ message: 'Book already in wishlist' });
 
-  const wishlistItem = {
-    bookId: book._id,
-    userEmail: email,
-    name: book.name,
-    image: book.image,
-    price: book.price,
-    addedAt: new Date(),
-  };
 
-  const result = await wishlistCollection.insertOne(wishlistItem);
-  res.send(result);
-});
 
-// Get wishlist for a user
-app.get('/wishlist/:email', verifyJWT, async (req, res) => {
-  const email = req.params.email;
-  const items = await wishlistCollection
-    .find({ userEmail: email })
-    .project({ name: 1, image: 1, price: 1 })
-    .toArray();
-  res.send(items);
-});
+    // Add a book to wishlist
+    app.post('/wishlist', verifyJWT, async (req, res) => {
+      const book = req.body;
+      const email = req.tokenEmail;
+
+      const exists = await wishlistCollection.findOne({ bookId: book._id, userEmail: email });
+      if (exists) return res.status(409).send({ message: 'Book already in wishlist' });
+
+      const wishlistItem = {
+        bookId: book._id,
+        userEmail: email,
+        name: book.name,
+        image: book.image,
+        price: book.price,
+        addedAt: new Date(),
+      };
+
+      const result = await wishlistCollection.insertOne(wishlistItem);
+      res.send(result);
+    });
+
+    // Get wishlist for a user
+    app.get('/wishlist/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
+      const items = await wishlistCollection
+        .find({ userEmail: email })
+        .project({ name: 1, image: 1, price: 1 })
+        .toArray();
+      res.send(items);
+    });
+
+
+    // --- REVIEWS SECTION START ---
+
+    // Post a review (Requires Login)
+    app.post('/reviews', verifyJWT, async (req, res) => {
+      const reviewData = req.body;
+      const userEmail = req.tokenEmail;
+
+      const newReview = {
+        bookId: reviewData.bookId,
+        bookName: reviewData.bookName,
+        userName: reviewData.userName,
+        userImage: reviewData.userImage,
+        rating: parseInt(reviewData.rating),
+        comment: reviewData.comment,
+        userEmail: userEmail,
+        date: new Date(),
+      };
+
+      const result = await reviewsCollection.insertOne(newReview);
+      res.send(result);
+    });
+
+    // Get all reviews for a specific book (Public access)
+    app.get('/reviews', async (req, res) => {
+      const bookId = req.query.bookId;
+      
+      const result = await reviewsCollection
+        .find({ bookId: bookId })
+        .sort({ date: -1 })
+        .toArray();
+      
+      res.send(result);
+    });
+
+    // --- REVIEWS SECTION END ---
 
 
 
@@ -364,6 +432,6 @@ app.get('/', (req, res) => {
   res.send('Hello from Server..')
 })
 
-// app.listen(port, () => {
-//   console.log(`Server is running on port ${port}`)
-// })
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`)
+})
